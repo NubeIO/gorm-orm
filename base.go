@@ -1,297 +1,295 @@
 package orm
 
 import (
+	"errors"
 	"fmt"
-	"strconv"
+	"github.com/NubeIO/rubix-rx/server/database"
+	"github.com/NubeIO/rubix-rx/server/database/response"
+	"github.com/go-playground/validator/v10"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+	"reflect"
 	"strings"
 )
 
-type WhereClause struct {
-	Query       string              `json:"query"`
-	Args        []interface{}       `json:"args"`
-	Preload     []string            `json:"preload"`
-	Limit       int                 `json:"limit"`
-	Offset      int                 `json:"offset"`
-	OrderByASC  string              `json:"orderByASC"`
-	OrderByDESC string              `json:"orderByDESC"`
-	Page        int                 `json:"page"`
-	PageSize    int                 `json:"pageSize"`
-	Aggregates  map[string][]string `json:"aggregates"`
-}
+var (
+	errNoWhereClause = gorm.ErrMissingWhereClause
+)
 
-func (w *WhereClause) AddPreload(preload string) *WhereClause {
-	w.Preload = append(w.Preload, preload)
-	return w
-}
-
-/*
-NewWhereClause
-
-w := NewWhereClause().Where("status = ?", "active")
-
-	.And("created_at > ?", someDate)
-	.Like("title", "%example%")
-	.IsNot("archived", true)
-
-This creates a WhereClause with the query "status = ? AND created_at > ? AND title LIKE ? AND archived IS NOT ?",
-and the corresponding arguments ["active", someDate, "%example%", true].
-*/
-func NewWhereClause() *WhereClause {
-	return &WhereClause{}
-}
-
-func NewWhere(query string, args []interface{}, limit, offset int) *WhereClause {
-	return &WhereClause{
-		Query:  query,
-		Args:   args,
-		Limit:  limit,
-		Offset: offset,
+func GetType(model interface{}) string {
+	t := reflect.TypeOf(model)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
 	}
-}
-
-func (w *WhereClause) Where(query string, args ...interface{}) *WhereClause {
-	w.Query = query
-	w.Args = args
-	return w
-}
-
-func (w *WhereClause) AddAnd() *WhereClause {
-	if w.Query != "" {
-		w.Query += " AND "
+	if t.Kind() == reflect.Struct {
+		// Get the name of the struct from the full type name
+		typeName := t.String()
+		parts := strings.Split(typeName, ".")
+		return parts[len(parts)-1]
 	}
-	return w
+	return "Not a struct"
 }
 
-func (w *WhereClause) AddOr() *WhereClause {
-	if w.Query != "" {
-		w.Query += " OR "
-	}
-	return w
+// PaginatedResult holds the result of a paginated query.
+type PaginatedResult struct {
+	Results    any   `json:"results"`    // Pointer to a slice of models
+	Count      int64 `json:"count"`      // Total number of results
+	TotalPages int   `json:"totalPages"` // Total number of pages
+	HasNext    bool  `json:"hasNext"`    // Indicates if there are more pages
+	HasPrev    bool  `json:"hasPrev"`    // Indicates if there are previous pages
+	Page       int   `json:"page"`       // Current page
 }
 
-func (w *WhereClause) And(query string, args ...interface{}) *WhereClause {
-	w.Query += " AND " + query // Add a space before "AND"
-	w.Args = append(w.Args, args...)
-	return w
+// ORM interface defines operations for creating, reading, updating, and deleting entities.
+type ORM interface {
+	Get(model any, where *WhereClause, preload []string) *response.ErrorResponse
+	All(model any, where *WhereClause) *response.ErrorResponse
+	GetAllPaginated(models any, page int, pageSize int, where *WhereClause) (*PaginatedResult, *response.ErrorResponse)
+	Create(model any) []*response.ErrorResponse
+	Update(updates any, uuid string, where *WhereClause) (any, *response.ErrorResponse)
+	Delete(model any, where *WhereClause) (bool, *response.ErrorResponse, int64) //int64 is deleted count
+	BulkCreate(models []interface{}) []*response.ErrorResponse
+	BulkUpdate(models []interface{}, uuids []string, where *WhereClause) []*response.ErrorResponse
+	BulkDelete(modelType any, uuids []string, where *WhereClause) []*response.ErrorResponse
+	GetDB() *gorm.DB
+	Migrate(models ...interface{}) error
 }
 
-func (w *WhereClause) Or(query string, args ...interface{}) *WhereClause {
-	w.Query += " OR " + query // Add a space before "OR"
-	w.Args = append(w.Args, args...)
-	return w
+var resp *response.ErrorResponse
+
+type orm struct {
+	DB       *gorm.DB
+	resp     *response.ErrorResponse
+	validate *validator.Validate
 }
 
-func (w *WhereClause) LimitClause(limit int) *WhereClause {
-	w.Limit = limit
-	return w
-}
-
-func (w *WhereClause) OffsetClause(offset int) *WhereClause {
-	w.Offset = offset
-	return w
-}
-
-func (w *WhereClause) Like(field, value string) *WhereClause {
-	w.Query += fmt.Sprintf("%s LIKE ?", field)
-	w.Args = append(w.Args, value)
-	return w
-}
-
-func (w *WhereClause) Is(field string, value interface{}) *WhereClause {
-	w.Query += fmt.Sprintf("%s IS ?", field)
-	w.Args = append(w.Args, value)
-	return w
-}
-
-func (w *WhereClause) IsNot(field string, value interface{}) *WhereClause {
-	w.Query += fmt.Sprintf("%s IS NOT ?", field)
-	w.Args = append(w.Args, value)
-	return w
-}
-
-func (w *WhereClause) GreaterThan(field string, value interface{}) *WhereClause {
-	w.Query += fmt.Sprintf("%s > ?", field)
-	w.Args = append(w.Args, value)
-	return w
-}
-
-func (w *WhereClause) LessThanOrEqual(field string, value interface{}) *WhereClause {
-	w.Query += fmt.Sprintf("%s <= ?", field)
-	w.Args = append(w.Args, value)
-	return w
-}
-
-func (w *WhereClause) GreaterThanOrEqual(field string, value interface{}) *WhereClause {
-	w.Query += fmt.Sprintf("%s >= ?", field)
-	w.Args = append(w.Args, value)
-	return w
-}
-
-func (w *WhereClause) NotEqual(field string, value interface{}) *WhereClause {
-	w.Query += fmt.Sprintf("%s != ?", field)
-	w.Args = append(w.Args, value)
-	return w
-}
-
-func (w *WhereClause) Equal(field string, value interface{}) *WhereClause {
-	w.Query += fmt.Sprintf("%s = ?", field)
-	w.Args = append(w.Args, value)
-	return w
-}
-
-// DateRange
-// This creates a WhereClause with the query "status = ? AND created_at >= ? AND created_at <= ?",
-// and the corresponding arguments ["active", "2021-01-01", "2021-12-31"].
-func (w *WhereClause) DateRange(field string, startDate, endDate interface{}) *WhereClause {
-	w.Query += fmt.Sprintf("%s >= ? AND %s <= ?", field, field)
-	w.Args = append(w.Args, startDate, endDate)
-	return w
-}
-
-func (w *WhereClause) LengthGreaterThan(field string, length int) *WhereClause {
-	w.Query += fmt.Sprintf("LENGTH(%s) > ?", field)
-	w.Args = append(w.Args, length)
-	return w
-}
-
-func BuildWhereClause(queryString string) (*WhereClause, error) {
-	whereClause := &WhereClause{
-		Aggregates: make(map[string][]string),
-	}
-
-	// Split the query string at '&' to get AND-separated conditions
-	andConditions := strings.Split(queryString, "&")
-
-	for _, andCond := range andConditions {
-		if strings.HasPrefix(andCond, "agg__") {
-			aggregateParts := strings.SplitN(andCond, "=", 2)
-			if len(aggregateParts) == 2 {
-				aggFunction, fields := aggregateParts[0], aggregateParts[1]
-				aggFunction = strings.TrimPrefix(aggFunction, "agg__")
-				whereClause.Aggregates[aggFunction] = strings.Split(fields, "|")
-				continue // Skip adding aggregates to the main query
-			}
-		}
-
-		if andCond == "" {
-			continue
-		}
-		if strings.HasPrefix(andCond, "useData") { // ignore this
-			continue
-		}
-		if strings.HasPrefix(andCond, "useCache") { // ignore this
-			continue
-		}
-
-		// Process preloading directives first
-		if strings.HasPrefix(andCond, "with_") {
-			preloadValues := strings.TrimPrefix(andCond, "with_")
-			for _, preloadDirective := range strings.Split(preloadValues, "|") {
-				whereClause.Preload = append(whereClause.Preload, preloadDirective)
-			}
-			continue
-		}
-
-		// Handle preloading and pagination
-		if parts := strings.SplitN(andCond, "=", 2); len(parts) == 2 {
-			key, value := parts[0], parts[1]
-
-			switch {
-			case key == "orderByASC": // Handle orderBy differently
-				whereClause.OrderByASC = value
-				continue
-			case key == "orderByDESC": // Handle orderBy differently
-				whereClause.OrderByDESC = value
-				continue
-			case key == "limit", key == "offset", key == "page", key == "pageSize":
-				if err := setPaginationField(whereClause, key, value); err != nil {
-					return nil, err
-				}
-				continue
-			}
-		}
-
-		// Process OR conditions within each AND condition
-		orConditions := strings.Split(andCond, "|")
-		orConditionParts := []string{}
-
-		for _, orCond := range orConditions {
-			cond, args, err := processCondition(orCond)
-			if err != nil {
-				return nil, err
-			}
-			if cond != "" {
-				orConditionParts = append(orConditionParts, cond)
-				whereClause.Args = append(whereClause.Args, args...)
-			}
-		}
-
-		if len(orConditionParts) > 0 {
-			// Join the OR conditions
-			groupQuery := "(" + strings.Join(orConditionParts, " OR ") + ")"
-			if whereClause.Query != "" {
-				whereClause.Query += " AND "
-			}
-			whereClause.Query += groupQuery
-		}
-	}
-
-	return whereClause, nil
-}
-
-func setPaginationField(wc *WhereClause, key, value string) error {
-	val, err := strconv.Atoi(value)
+func New(c *database.DBConfig, resp *response.ErrorResponse) ORM {
+	db, err := database.Connect(c)
 	if err != nil {
-		return err
+		panic(err) // Consider returning an error instead
 	}
-	switch key {
-	case "limit":
-		wc.Limit = val
-	case "offset":
-		wc.Offset = val
-	case "page":
-		wc.Page = val
-	case "pageSize":
-		wc.PageSize = val
+
+	return &orm{
+		DB:       db,
+		resp:     resp,
+		validate: validator.New(),
+	}
+}
+
+func GetErrorResponse() *response.ErrorResponse {
+	return resp
+}
+
+func (o *orm) Get(model any, where *WhereClause, preload []string) *response.ErrorResponse {
+	query := o.DB
+	for _, preloadAssociation := range preload {
+		query = query.Preload(preloadAssociation)
+	}
+
+	if where == nil {
+		return o.resp.New(gorm.ErrMissingWhereClause, model)
+	}
+
+	result := query.Where(where.Query, where.Args...).First(model)
+	return o.resp.New(result.Error, model)
+}
+
+func (o *orm) All(models any, where *WhereClause) *response.ErrorResponse {
+	query := o.DB
+	if where != nil {
+		preload := where.Preload
+		for _, preloadAssociation := range preload {
+			query = query.Preload(preloadAssociation)
+		}
+
+		if where.Limit > 0 {
+			query = query.Limit(where.Limit)
+		}
+		if where.Offset > 0 {
+			query = query.Offset(where.Offset)
+		}
+
+		if where.OrderByASC != "" {
+			// Handle ordering based on the orderBy parameter
+			query = query.Order(fmt.Sprintf("%s ASC", where.OrderByASC))
+		}
+
+		if where.OrderByDESC != "" {
+			// Handle ordering based on the orderBy parameter
+			query = query.Order(fmt.Sprintf("%s DESC", where.OrderByDESC))
+		}
+
+		result := query.Where(where.Query, where.Args...).Find(models)
+		return o.resp.New(result.Error, models)
+	}
+
+	result := query.Find(models)
+	return o.resp.New(result.Error, models)
+}
+
+func (o *orm) GetAllPaginated(models any, page int, pageSize int, where *WhereClause) (*PaginatedResult, *response.ErrorResponse) {
+	var count int64
+	db := o.DB.Model(models)
+	if where != nil {
+		db = db.Where(where.Query, where.Args...)
+	}
+	err := db.Count(&count).Error
+	if err != nil {
+		return nil, o.resp.New(err, models)
+	}
+
+	totalPages := int(count) / pageSize
+	if int(count)%pageSize > 0 {
+		totalPages++
+	}
+
+	offset := (page - 1) * pageSize
+	if where != nil {
+		err = db.Offset(offset).Limit(pageSize).Find(models).Error
+	} else {
+		err = db.Offset(offset).Limit(pageSize).Find(models).Error
+	}
+
+	return &PaginatedResult{
+		Results:    models,
+		Count:      count,
+		TotalPages: totalPages,
+		HasNext:    page < totalPages,
+		HasPrev:    page > 1,
+		Page:       page,
+	}, o.resp.New(err, models)
+}
+
+func (o *orm) Create(model any) []*response.ErrorResponse {
+	var respErrors []*response.ErrorResponse
+	if err := o.validate.Struct(model); err != nil {
+		for _, err := range err.(validator.ValidationErrors) {
+			newErr := errors.New(fmt.Sprintf("Field: %s, ErrorMessage: %s\n", err.StructField(), err.Tag()))
+			n := o.resp.NewValidation(newErr)
+			respErrors = append(respErrors, n)
+		}
+		return respErrors
+	}
+	err := o.DB.Create(model).Error
+	if err != nil {
+		respErrors = append(respErrors, o.resp.New(err, model))
+		return respErrors
+	}
+	r := o.DB.Preload(clause.Associations).First(model).Error
+	if r != nil {
+		respErrors = append(respErrors, o.resp.New(r, model))
+		return respErrors
 	}
 	return nil
 }
 
-func processCondition(condition string) (string, []interface{}, error) {
-	parts := strings.SplitN(condition, "=", 2)
-	if len(parts) != 2 {
-		return "", nil, nil // Skip if format is not 'key=value'
+func (o *orm) Update(updates any, uuid string, where *WhereClause) (any, *response.ErrorResponse) {
+	if err := o.validate.Struct(updates); err != nil {
+		return nil, o.resp.New(err, updates)
+	}
+	entity := GetType(updates)
+	if where == nil {
+		return nil, o.resp.New(gorm.ErrMissingWhereClause, updates)
 	}
 
-	key, value := parts[0], parts[1]
-	fieldParts := strings.SplitN(key, "__", 2)
-	field := fieldParts[0]
-	operator := "=" // Default operator
-
-	if len(fieldParts) == 2 {
-		switch fieldParts[1] {
-		case "gt":
-			operator = ">"
-		case "gte":
-			operator = ">="
-		case "lt":
-			operator = "<"
-		case "lte":
-			operator = "<="
-		case "ne":
-			operator = "!="
-		case "not":
-			operator = "NOT"
-
-		}
+	err := o.DB.First(entity, uuid).Error
+	if err != nil {
+		return nil, o.resp.New(err, updates)
 	}
 
-	condition = field + " " + operator + " ?"
-	return condition, []interface{}{value}, nil
+	err = o.DB.Model(entity).Where(where.Query, where.Args...).Updates(updates).Error
+	if err != nil {
+		return nil, o.resp.New(err, updates)
+	}
+
+	err = o.DB.Preload(clause.Associations).Where(where.Query, where.Args...).First(entity).Error
+	return entity, o.resp.New(err, updates)
 }
 
-// Example usage:
-// whereClause, err := BuildWhereClause("firstName__ne=John&lastName=Smith|age__gt=30&with_team|with_friends&limit=10&offset=20&page=2&pageSize=10")
-// if err != nil {
-//     // handle error
-// }
+func (o *orm) Delete(model any, where *WhereClause) (bool, *response.ErrorResponse, int64) {
+	if where == nil {
+		return false, o.resp.New(gorm.ErrMissingWhereClause, model), 0
+	}
+	r := o.DB.Where(where.Query, where.Args...).Delete(model)
+	if r.Error != nil {
+		return false, o.resp.ErrorDeletion(r.Error, model), 0
+	} else if r.RowsAffected == 0 {
+		return false, o.resp.ErrorDeletion(r.Error, model), 0
+	}
+	return true, nil, r.RowsAffected
+
+}
+
+// BULK
+
+func (o *orm) BulkCreate(models []interface{}) []*response.ErrorResponse {
+	var respErrors []*response.ErrorResponse
+	tx := o.DB.Begin()
+	for _, model := range models {
+		if err := o.validate.Struct(model); err != nil {
+			respErrors = append(respErrors, o.resp.New(err, model))
+			return respErrors
+		}
+		if err := tx.Create(model).Error; err != nil {
+			respErrors = append(respErrors, o.resp.New(err, model))
+			tx.Rollback()
+			return respErrors
+		}
+	}
+	if err := tx.Commit().Error; err != nil {
+		respErrors = append(respErrors, o.resp.New(err, nil))
+	}
+	return respErrors
+}
+
+func (o *orm) BulkUpdate(models []interface{}, uuids []string, where *WhereClause) []*response.ErrorResponse {
+	var respErrors []*response.ErrorResponse
+	if len(models) != len(uuids) {
+		return append(respErrors, o.resp.New(errors.New("mismatch in models and uuids length"), nil))
+	}
+
+	tx := o.DB.Begin()
+	for i, model := range models {
+		if where == nil {
+			return append(respErrors, o.resp.New(errNoWhereClause, nil))
+		}
+		if err := tx.Model(model).Where("uuid = ?", uuids[i]).Where(where.Query, where.Args...).Updates(model).Error; err != nil {
+			respErrors = append(respErrors, o.resp.New(err, model))
+			tx.Rollback()
+			return respErrors
+		}
+	}
+	if err := tx.Commit().Error; err != nil {
+		respErrors = append(respErrors, o.resp.New(err, nil))
+	}
+	return respErrors
+}
+
+func (o *orm) BulkDelete(modelType any, uuids []string, where *WhereClause) []*response.ErrorResponse {
+	var respErrors []*response.ErrorResponse
+	if where == nil {
+		return append(respErrors, o.resp.New(errNoWhereClause, nil))
+	}
+
+	tx := o.DB.Begin()
+	for _, uuid := range uuids {
+		entity := GetType(modelType)
+		if err := tx.Where("uuid = ?", uuid).Where(where.Query, where.Args...).Delete(entity).Error; err != nil {
+			respErrors = append(respErrors, o.resp.New(err, entity))
+			tx.Rollback()
+			return respErrors
+		}
+	}
+	if err := tx.Commit().Error; err != nil {
+		respErrors = append(respErrors, o.resp.New(err, nil))
+	}
+	return respErrors
+}
+
+func (o *orm) GetDB() *gorm.DB {
+	return o.DB
+}
+
+func (o *orm) Migrate(models ...interface{}) error {
+	return o.DB.AutoMigrate(models...)
+}
