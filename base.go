@@ -12,6 +12,17 @@ import (
 	"strings"
 )
 
+type ErrorResponse struct {
+	Code         string `json:"code"`
+	Field        string `json:"field,omitempty"`  // Field that caused the error
+	Advice       string `json:"advice,omitempty"` // eg; an exiting entry already contains filed ""
+	Error        error  `json:"-"`
+	ErrorMessage string `json:"error,omitempty"`
+	Model        string `json:"model,omitempty"`
+	translations map[string]*ErrorResponse
+}
+
+
 var (
 	errNoWhereClause = gorm.ErrMissingWhereClause
 )
